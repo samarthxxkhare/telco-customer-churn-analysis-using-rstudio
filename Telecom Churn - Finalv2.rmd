@@ -1,0 +1,575 @@
+---
+title: "Telecom Churn Project - Final"
+author: "Tony S John"
+date: "November 4, 2018"
+revised: "November 8, 2018"
+output: html_document
+---
+
+# Importing libraries
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+loadlibrary<-function() {
+  library(tidyverse)
+  library(ISLR)
+  library(MASS)
+  library(modelr)
+  library(class)
+  library(caTools)
+  library(recipes)
+  library(rsample)
+  library(tree)
+  library(gbm)
+  library(yardstick)
+  library(forcats)
+  library(lime)
+  library(pROC)
+  library(glmnet)
+  library(corrr)
+  print("The libraries have been loaded.")
+}
+
+#loading library
+loadlibrary()
+
+```
+
+## Data importing and initial analysis
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+
+#reading datset
+churn<- read_csv("WA_Fn-UseC_-Telco-Customer-Churn.csv")
+
+#checking integrity and basic exploration
+dim(churn)
+summary(churn)
+str(churn)
+
+#droping customerID as it is not required in the analysis. 
+churn <- churn[,!names(churn)=="customerID"]
+
+#Dealing with missing value
+colnames(churn)[colSums(is.na(churn))>0]
+churn[is.na(churn$TotalCharges),]
+churn[churn$tenure==0,]
+
+#All missing value in Total Charges are found when the tenure is 0 indicating the customer might not have been billed till then. So, we can impute value "0" to replace the missing data
+churn<-churn[!is.na(churn$TotalCharges),]
+
+#churn$extraCharges <- churn$TotalCharges-(churn$MonthlyCharges*churn$tenure)
+
+#hist(churn$extraCharges)
+
+#reducing variablibilty in the categorical field.
+churn<- churn%>%mutate_if(is.character, str_replace_all, pattern="No internet service", replacement= "No")
+churn<- churn%>%mutate_if(is.character, str_replace_all, pattern="No phone service", replacement= "No")
+
+
+ggplot(data = churn)+
+  geom_boxplot(aes(InternetService,MonthlyCharges), col ="red")
+
+#checking skewness for numerical data.
+ggplot(data = churn)+
+  geom_freqpoly(aes(MonthlyCharges), col ="red")
+
+##Intial Data Exploration-Test1
+##gender
+ggplot(churn) +
+  geom_bar(aes(x = gender, fill = Churn), position = "dodge")
+churn %>%
+  group_by(gender,Churn) %>%
+  summarise(n=n())
+##SeniorCitizen
+ggplot(churn) +
+  geom_bar(aes(x = SeniorCitizen, fill = Churn), position = "dodge")
+churn %>%
+  group_by(SeniorCitizen) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n / sum(n))
+churn %>%
+  group_by(SeniorCitizen, Churn) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n / sum(n))
+##Partner
+ggplot(churn) +
+  geom_bar(aes(x=Partner, fill = Churn), position = "dodge")
+churn %>%
+  group_by(Partner) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n / sum(n))
+churn %>%
+  group_by(Partner, Churn) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n / sum(n))
+##Dependents
+ggplot(churn) +
+  geom_bar(aes_string(x="Dependents", fill="Churn"), position = "dodge")
+churn %>% group_by(Dependents) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n / sum(n))
+churn %>% group_by(Dependents, Churn) %>%
+  summarise(n=n()) %>%
+  mutate(freq = n / sum(n))
+
+##Another useful visualization is the box and whisker plot. This gives us a little bit more compact visual of our data, and helps us identify outliers.
+# Senior Citizens
+ggplot(churn, aes(x = SeniorCitizen, y = MonthlyCharges)) +
+  geom_boxplot()
+# Partner
+ggplot(churn, aes(x = Partner, y = MonthlyCharges)) +
+  geom_boxplot()
+# Dependents
+ggplot(churn, aes(x = Dependents, y = MonthlyCharges)) +
+  geom_boxplot()
+##There seem to be subsets of people most likely to churn within their respective customer segments. Lets compare them so that we can identify where we would potentially focus our efforts.
+## Monthly Charges and tenure of senior citizens
+churn %>%
+  dplyr::select(SeniorCitizen, Churn, MonthlyCharges, tenure) %>%
+  filter(SeniorCitizen == 1, Churn == "Yes") %>%
+  summarize(n = n(),
+            total = sum(MonthlyCharges),
+            avg_tenure = sum(tenure)/n)
+# Monthly Charges and tenure of people without a partner
+churn %>%
+  dplyr::select(Partner, Churn, MonthlyCharges, tenure) %>%
+  filter(Partner == "No", Churn == "Yes") %>%
+  summarise(n = n(),
+            total = sum(MonthlyCharges),
+            avg_tenure = sum(tenure)/n)
+
+# Monthly Charges and tenure of people without dependents
+churn %>%
+  dplyr::select(Dependents, Churn, MonthlyCharges, tenure) %>%
+  filter(Dependents == "No", Churn == "Yes") %>%
+  summarise(n = n(),
+            total = sum(MonthlyCharges),
+            avg_tenure = sum(tenure)/n)
+
+##Based on the results, we should focus our efforts on people without dependents. This customer segment that churned had nearly 2.3MM in total charges compared to 1.3MM for people without partners, and only 900K for senior citizens.
+no_dependents <- churn %>% filter(Dependents == "No")
+
+ggplotGrid(ncol=2,
+lapply(c("PhoneService","MultipleLines","InternetService","OnlineSecurity","OnlineBackup",
+         "DeviceProtection"),
+       function(col){
+         ggplot(no_dependents,aes_string(col)) + geom_bar(aes(fill=Churn),position="dodge")
+       }))
+ggplotGrid(ncol=2,
+lapply(c("TechSupport","StreamingTV","StreamingMovies","Contract",
+         "PaperlessBilling"),
+       function(col){
+         ggplot(no_dependents,aes_string(col)) + geom_bar(aes(fill=Churn),position="dodge")
+       }))
+ggplot(no_dependents) +
+  geom_bar(aes(x=PaymentMethod,fill=Churn), position = "dodge")
+
+
+```
+
+## Data Preprocessing
+
+
+
+```{r pressure, echo=FALSE}
+#spliting data to test and train using the rsample library.
+
+set.seed(123)
+train_test_split <- initial_split(churn, prop = 0.8)
+train_test_split
+
+train<- training(train_test_split)
+test<- testing(train_test_split)
+
+#preprocessing using the recipe library.
+#recipe basically saves the series of steps used in your preprocessing and allow us to reuse the sets for any new data. Down the line afterwards if you want to add other steps, just add it to the existing recipe so that the data need not be retrained from the start-- helpful for big datasets.
+
+#steps involved in our process
+# 1. Convert the tenure into into different groups to compare the probabily to churn among the groups.
+#2. Convert SeniorCitizn to a factor
+#3. Apply BoxCox transformation to our TotalCharges variable to reduce the skewness and normalise the variable.
+#4. Add dummy variables to the categorical variables
+#5#6. Standardize data(Subtract mean and divide by SD), to improve the prediction power, eg. improve the KNN algorithm so that totalCharges distance doesn't shadow the categorical variable distance.
+
+churn_rec_1 <- recipe(Churn ~ ., data = churn) %>%
+  step_num2factor(tenure, transform = function(x) cut(x,
+                                                      breaks = c(0,12,24,36,48,60,Inf),
+                                                      labels = c("Less than year",
+                                                                 "1-2 years",
+                                                                 "2-3 years",
+                                                                 "3-4 years",
+                                                                 "4-5 years",
+                                                                 "More than 5 years"),
+                                                      include.lowest = TRUE))%>%
+  step_num2factor(SeniorCitizen, transform = function(x) if_else(x==0,"No","Yes"))%>%
+  step_log(MonthlyCharges,TotalCharges)%>%
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes())%>%
+  prep(data = train,retain = TRUE)
+
+churn_rec <- churn_rec_1%>%
+  step_dummy(all_nominal(),-all_outcomes())%>%
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes())%>%
+  prep(data = train)
+  
+# Apply the preprocessing steps on the training and test data set
+
+train_tbl <-bake(churn_rec, newdata = train)
+test_tbl <- bake(churn_rec,newdata = test)
+
+
+train_tbl_inf <-bake(churn_rec_1, newdata = train)
+test_tbl_inf <- bake(churn_rec_1,newdata = test)
+
+
+#checking # total cases
+
+ggplot(data = train_tbl)+
+  geom_bar(aes(Churn,col = Churn))
+
+
+#checking skewness for numerical data.
+ggplot(data = train_tbl)+
+  geom_freqpoly(aes(MonthlyCharges), col ="red")
+
+#checking any missing data introduced during data transformation.
+colnames(train_tbl)[colSums(is.na(train_tbl))>0]
+colnames(test_tbl)[colSums(is.na(test_tbl))>0]
+
+#checking correlation btw variables
+
+library(reshape)
+
+highcor<- train_tbl%>%
+  mutate(Churn = Churn %>% as.factor() %>% as.numeric())%>%
+  correlate()%>%
+  fashion()%>%
+  melt(id='rowname')%>%
+  na.omit()%>%
+  mutate(value=value%>%as.numeric())%>%
+  filter(abs(value)>0.5)%>%
+  arrange(value)
+
+```
+
+#Logistic regression using whole variables
+
+
+```{r}
+
+log.mod <- glm(Churn~.-TotalCharges,data=train_tbl,family="binomial")
+summary(log.mod)
+
+log.prob=predict(log.mod,test_tbl,type="response")
+log.predDir=if_else(log.prob>0.5,"Yes","No")
+table(log.predDir,test_tbl$Churn)
+mean(log.predDir==test_tbl$Churn)
+
+```
+
+
+#LDA Model
+
+```{r}
+
+lda.pred=lda(Churn~.-TotalCharges,data=train_tbl)
+lda.pred
+
+ldatest=predict(lda.pred,test_tbl)
+
+table(ldatest$class,test_tbl$Churn) 
+mean(ldatest$class==test_tbl$Churn)
+
+```
+
+
+#QDA
+
+```{r}
+
+qda.pred=qda(Churn~.-TotalCharges,data=train_tbl)
+qda.pred
+qdatest=predict(qda.pred,test_tbl)
+
+table(qdatest$class,test_tbl$Churn) 
+mean(qdatest$class==test_tbl$Churn)
+
+```
+
+
+#KNN
+
+```{r}
+knntrain=train_tbl%>%dplyr::select(-Churn)
+knntest=test_tbl%>%dplyr::select(-Churn)
+
+knnlabel=as.matrix(train_tbl%>%dplyr::select(Churn))
+knn.pred = knn(knntrain,knntest,knnlabel, k=100)
+table(knn.pred,test_tbl$Churn)
+mean(knn.pred==test_tbl$Churn)
+```
+
+#Decision Tree
+
+```{r}
+
+library(tree)
+Churntree <- tree(Churn~., data=train_tbl, mindev=0.001)
+summary(Churntree)
+
+plot(Churntree)
+text(Churntree, pretty=0)
+
+tree.prob <- predict(Churntree, test_tbl, type="vector")
+tree.pred <- predict(Churntree, test_tbl, type="class")
+table(tree.pred,test_tbl$Churn)
+mean(tree.pred==test_tbl$Churn)
+
+
+#pruning the decision tree
+
+set.seed (3)
+cv.churn=cv.tree(Churntree ,FUN=prune.misclass )
+cv.churn
+
+prune.cv =prune.misclass(Churntree, best = 10)
+tree.prob <- predict(prune.cv, test_tbl, type="vector")
+tree.pred <- predict(prune.cv, test_tbl, type="class")
+table(tree.pred,test_tbl$Churn)
+mean(tree.pred==test_tbl$Churn)
+
+```
+
+
+Improving the logistic model using lasso, Lasso shinks the coefficients of less significant variables to zero, therefore the model will have more stability. 
+
+#Using Lasso to shrinking coef of less significant variables.
+
+```{r}
+
+grid=10^seq(10,-2,length=100)
+
+x=as.matrix(train_tbl[ ,!names(train_tbl) %in% c("Churn")])
+y=train_tbl%>%
+  transmute(Churncode=if_else(train_tbl$Churn=="Yes",1,0))%>%
+  as.matrix()
+
+lasso.mod =glmnet(x,y,alpha =1, lambda =grid, standardize = TRUE, family = "binomial")
+cv.out=cv.glmnet(x,y,alpha =1)
+
+plot(cv.out)
+
+plot(lasso.mod, xvar="lambda", xlim =c(-5,0))
+bestlam =cv.out$lambda.min
+
+newxval=as.matrix(test_tbl[,!names(test_tbl) %in% c("Churn")])
+
+lasso.prob=predict(lasso.mod ,s=bestlam ,newx=newxval, type="response")
+
+lasso.coef=predict (lasso.mod, s=bestlam, type ="coefficients")
+lasso.coef
+
+lasso.predDir=if_else(lasso.prob>0.5,"Yes","No")
+table(lasso.predDir,test_tbl$Churn)
+mean(lasso.predDir==test_tbl$Churn)
+
+```
+
+
+#Boosting the decision tree model
+
+```{r}
+#boosting
+
+library (gbm)
+set.seed (3)
+train_tbl_tree=train_tbl%>%
+  mutate(Churn=if_else(train_tbl$Churn=="Yes",1,0))
+boost.churn =gbm(Churn???.,data=train_tbl_tree, distribution="bernoulli",n.trees =2000, interaction.depth = 1,bag.fraction = 0.4,cv.folds=5)
+
+ntree_opt_cv <- gbm.perf(object = boost.churn, 
+                          method = "cv")
+
+boost.prob=predict(boost.churn,newdata=test_tbl, n.trees=ntree_opt_cv, type="response")
+
+boost.predDir=if_else(boost.prob>0.5,"Yes","No")
+
+table(boost.predDir,test_tbl$Churn)
+mean(boost.predDir==test_tbl$Churn)
+```
+
+
+ROC and AUC of models
+
+```{r}
+library(ROCR)
+
+
+pROC::auc(response = if_else(test_tbl$Churn=="Yes",1,0), predictor = log.prob)
+pROC::auc(response = if_else(test_tbl$Churn=="Yes",1,0), predictor = lasso.prob)
+pROC::auc(response = if_else(test_tbl$Churn=="Yes",1,0), predictor = ldatest$posterior[,2])
+pROC::auc(response = if_else(test_tbl$Churn=="Yes",1,0), predictor = qdatest$posterior[,2])
+pROC::auc(response = if_else(test_tbl$Churn=="Yes",1,0), predictor = boost.prob)
+
+# List of predictions
+preds_list <- list(log.prob, lasso.prob, ldatest$posterior[,2], qdatest$posterior[,2], tree.prob[,2], boost.prob)
+
+# List of actual values (same for all)
+m <- length(preds_list)
+actuals_list <- rep(list(test_tbl$Churn), m)
+
+# Plot the ROC curves
+pred <- prediction(preds_list, actuals_list)
+rocs <- performance(pred, "tpr", "fpr")
+plot(rocs, col = as.list(1:m), main = "Test Set ROC Curves")
+legend(x = "bottomright", 
+       legend = c("Logistic regression", "Lasso", "LDA", "QDA", "Pruned Decision Tree", "GBM"),
+       fill = 1:m)
+
+
+
+```
+
+
+The cost function to determine the thresholds.
+
+Assumptions
+1. The cost of a customer churn = $300
+2. The cost of offers offered to churnable customer = $80
+3. All customers offered a offer was retained.
+
+
+```{r}
+
+F_cost<-function(Prob,Actual) {
+  cost<- rep(NA,100)
+  for (i in seq(1,100,1)) {
+    predChurn=if_else(Prob>i/100,"Yes","No")
+    TP <- sum(predChurn=="Yes" & Actual=="Yes")
+    FP <- sum(predChurn=="Yes"& Actual=="No")
+    TN <- sum(predChurn=="No" & Actual=="No")
+    FN <- sum(predChurn=="No" & Actual=="Yes")
+    cost[i] <- FN*300+TP*80+FP*80+TN*0
+  }
+  return(cost)
+}
+
+F_cost_thresh<-function(Prob,Actual,thresh=0.5) {
+  predChurn=if_else(Prob>=thresh,"Yes","No")
+  TP <- sum(predChurn=="Yes" & Actual=="Yes")
+  FP <- sum(predChurn=="Yes"& Actual=="No")
+  TN <- sum(predChurn=="No" & Actual=="No")
+  FN <- sum(predChurn=="No" & Actual=="Yes")
+  cost <- FN*300+TP*80+FP*80+TN*0
+  return(cost)
+}
+
+cost = list()
+cost$threshold=seq(0.01,1,0.01)
+log.prob.train=predict(log.mod,train_tbl,type="response")
+cost$log <- F_cost(log.prob.train,train_tbl$Churn)
+lasso.prob.train=predict(lasso.mod ,s=bestlam ,newx=x, type="response")
+cost$lasso <- F_cost(lasso.prob.train,train_tbl$Churn)
+boost.pred.train=predict(boost.churn,newdata=train_tbl, n.trees=ntree_opt_cv, type="response")
+cost$decisiontree <- F_cost(boost.pred.train,train_tbl$Churn)
+
+plot(cost$threshold,cost$log,type='l',col ="red")
+lines(cost$threshold,cost$lasso,col ="blue")
+lines(cost$threshold,cost$decisiontree,col ="green")
+lines(c(0,max(cost$log))~c(0.5,0.5), lwd =2 , lty=2)
+
+
+cost.without<-sum(as.numeric(test_tbl$Churn))*300
+cost.lasso<-F_cost_thresh(lasso.prob,test_tbl$Churn,which.min(cost$lasso)/100)
+cost.log<-F_cost_thresh(log.prob,test_tbl$Churn,which.min(cost$log)/100)
+cost.dt<-F_cost_thresh(boost.prob,test_tbl$Churn,which.min(cost$decisiontree)/100)
+
+
+sprintf("Cost without model: %0.0f",cost.without)
+sprintf("Cost with model: %0.0f",min(cost.log,cost.lasso,cost.dt))
+sprintf("Total cost savings: %0.0f",cost.without-min(cost.log,cost.lasso,cost.dt))
+
+
+```
+
+
+
+
+#inferences
+
+```{r}
+
+#Senior Citizen
+
+ggplot(aes(test_tbl_inf$SeniorCitizen,log.prob),data=test_tbl_inf)+
+  geom_violin(col="black", fill = "lightgrey", alpha = 0.7)+
+  geom_jitter(aes(col=test_tbl_inf$SeniorCitizen), alpha =0.5,show.legend = FALSE)+
+  scale_x_discrete(name="Senior Citizen")+
+  scale_y_continuous(name="Churn", limits = c(0,1))+
+  theme_classic()
+
+#tenure
+
+ggplot(aes(test_tbl_inf$tenure,log.prob),data=test_tbl_inf)+
+  geom_violin(col="black", fill = "lightgrey", alpha = 0.7)+
+  geom_jitter(aes(col=test_tbl_inf$tenure), alpha =0.5,show.legend = FALSE)+
+  scale_x_discrete(name="Tenure", limits = c("Less than year","1-2 years","2-3 years","3-4 years","4-5 years","More than 5 years"))+
+  scale_y_continuous(name="Churn", limits = c(0,1))+
+  theme_classic()
+
+
+#InternetService
+
+
+ggplot(aes(test_tbl_inf$InternetService,log.prob),data=test_tbl_inf)+
+  geom_violin(col="black", fill = "lightgrey", alpha = 0.7)+
+  geom_jitter(aes(col=test_tbl_inf$InternetService), alpha =0.5,show.legend = FALSE)+
+  scale_x_discrete(name="Internet Service")+
+  scale_y_continuous(name="Churn", limits = c(0,1))+
+  theme_classic()
+
+
+#Contract
+
+ggplot(aes(test_tbl_inf$Contract,log.prob),data=test_tbl_inf)+
+  geom_violin(col="black", fill = "lightgrey", alpha = 0.7)+
+  geom_jitter(aes(col=test_tbl_inf$Contract), alpha =0.5,show.legend = FALSE)+
+  scale_x_discrete(name="Contract")+
+  scale_y_continuous(name="Churn", limits = c(0,1))+
+  theme_classic()
+
+#PaymentMethod
+
+ggplot(aes(test_tbl_inf$PaymentMethod,log.prob),data=test_tbl_inf)+
+  geom_violin(col="black", fill = "lightgrey", alpha = 0.7)+
+  geom_jitter(aes(col=test_tbl_inf$PaymentMethod), alpha =0.5,show.legend = FALSE)+
+  scale_x_discrete(name="Payment Method")+
+  scale_y_continuous(name="Churn", limits = c(0,1))+
+  theme_classic()
+
+#PaperlessBilling
+
+ggplot(aes(test_tbl_inf$PaperlessBilling,log.prob),data=test_tbl_inf)+
+  geom_violin(col="black", fill = "lightgrey", alpha = 0.7)+
+  geom_jitter(aes(col=test_tbl_inf$PaperlessBilling), alpha =0.5,show.legend = FALSE)+
+  scale_x_discrete(name="Paperless Billing")+
+  scale_y_continuous(name="Churn", limits = c(0,1))+
+  theme_classic()
+
+#TechSupport
+
+ggplot(aes(test_tbl_inf$TechSupport,log.prob),data=test_tbl_inf)+
+  geom_violin(col="black", fill = "lightgrey", alpha = 0.7)+
+  geom_jitter(aes(col=test_tbl_inf$TechSupport), alpha =0.5,show.legend = FALSE)+
+  scale_x_discrete(name="Tech Support")+
+  scale_y_continuous(name="Churn", limits = c(0,1))+
+  theme_classic()
+
+
+```
+
